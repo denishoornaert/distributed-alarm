@@ -32,6 +32,7 @@
 *                                       TASK PRIORITIES
 *********************************************************************************************************
 */
+// Inpits have beeen prioritised over the out puts and the background tasks are left in the middle.
 #define  APP_TASK_START_PRIO                    0                       /* Lower numbers are of higher priority                     */
 #define  Timer_Task_PRIO						3
 #define  Keyboard_Task_PRIO						1
@@ -46,7 +47,7 @@
 */
 #define	 APP_TASK_1_PERIOD						10
 #define	 Timer_Task_PERIOD						100 // useless ??
-#define	 Keyboard_Task_PERIOD					50  // set to 100
+#define	 Keyboard_Task_PERIOD					100
 #define  Password_Management_Task_PERIOD		100
 #define  Button_handler_Task_PERIOD				100
 
@@ -86,12 +87,16 @@ OS_STK  AppLCDTaskStk[APP_TASK_LCD_STK_SIZE];
 // Programmer defined variables
 unsigned char flagSystemUnlocked = 0;
 unsigned char flagTimerActivated = 0;
+unsigned char flagPasswordChange = 0;
 char systemProvidedCode[4] = {'B', '1', '6', '9'};
 
-char pmsg[4];
+#define PWDSIZE 4
+#define STARCHAR 42
+
+char pmsg[PWDSIZE+1] = "    "; // the '+1' is due to the eos character
 OS_EVENT* myBox;
 
-char lcdPmsg[4];
+char lcdpmsg[PWDSIZE+1] = "    "; // the '+1' is due to the eos character
 OS_EVENT* lcdBox;
 
 //////////////////////////////////////////////////////////////////////////////
@@ -118,10 +123,11 @@ CPU_INT16S  main (void) {
 
 	myBox = OSMboxCreate((void*)0);
 	lcdBox = OSMboxCreate((void*)0);
-	TRISDbits.TRISD12 = 1;	// set pin to input
-	TRISAbits.TRISA0 = 0;	// set pin to output.
-	TRISAbits.TRISA1 = 0;	// set pin to output.
-	TRISAbits.TRISA2 = 0;	// set pin to output.
+	TRISDbits.TRISD12 = 1;	// set pin to input. INTRUSION
+	TRISDbits.TRISD13 = 1;	// set pin to input. CHANGING PASSWORD
+	TRISAbits.TRISA0 = 0;	// set pin to output. BUZZER
+	TRISAbits.TRISA1 = 0;	// set pin to output. SYSTEM STATUS (UN)LOCK
+	TRISAbits.TRISA2 = 0;	// set pin to output. TIMER STATUS (DES)ACTIVATED
 	TRISAbits.TRISA7 = 0;	// set pin to output.
 
 	OSTaskCreateExt(
@@ -248,6 +254,8 @@ void LockedSystemActOnCorrectPassword() {
     // Buzzer desactivated !
     LATAbits.LATA0 = 0;
     // timer desactivated !
+	LATAbits.LATA2 = 0;
+	flagTimerActivated = 0;
     OSTaskSuspend(Timer_Task_PRIO);
 	TASK_ENABLE2 = 0;
 }
@@ -264,6 +272,22 @@ unsigned char strEqual(char* word1, char* word2) {
 	return (word1[0] == word2[0] & word1[1] == word2[1] & word1[2] == word2[2] & word1[3] == word2[3]);
 }
 
+void checkPasswordValidity(char* userProvidedCode, INT8U* err) {
+	if(*err == OS_ERR_NONE) {
+       if(strEqual(userProvidedCode, systemProvidedCode)) {
+           if(!flagSystemUnlocked) {
+               LockedSystemActOnCorrectPassword();
+           }
+           else {
+               UnlockedSystemActOnCorrectPassword();
+           }
+       }
+		else {
+			OSMboxPost(lcdBox, "Wrong pwd");
+		}
+	}
+}
+
 static  void PasswordManagementTask (void *p_arg) {
 	(void)p_arg;			// to avoid a warning message
 
@@ -271,34 +295,31 @@ static  void PasswordManagementTask (void *p_arg) {
 	char* userProvidedCode;
     while(1) {
 		TASK_ENABLE1 = 1;
-        userProvidedCode = OSMboxPend(myBox, 50, &err); // blocking instruction
-		if(err == OS_ERR_NONE) {
-	        if(strEqual(userProvidedCode, systemProvidedCode)) {
-	            if(!flagSystemUnlocked) {
-	                LockedSystemActOnCorrectPassword();
-	            }
-	            else {
-	                UnlockedSystemActOnCorrectPassword();
-	            }
-	        }
-			else {
-				OSMboxPost(lcdBox, "Wrong pwd");
-			}
+		if(!flagPasswordChange) {
+	        userProvidedCode = OSMboxPend(myBox, 50, &err); // blocking instruction
+			checkPasswordValidity(userProvidedCode, &err);
+		}
+		else { // flagPasswordChange == 1
+			OSMboxPost(lcdBox, "Enter old pwd");
+			userProvidedCode = OSMboxPend(myBox, 50, &err); // blocking instruction
 		}
 		TASK_ENABLE1 = 0;
 		OSTimeDly(Password_Management_Task_PERIOD); // useful ?
     }
 }
 
+// TODO check the timer 500 or 1000. It is working with 1000 but why ?!
 static  void  TimerTask (void *p_arg) {
 	(void)p_arg;			// to avoid a warning message
 
 	char unsigned counter = 60;
 	TASK_ENABLE2 = 1;
     LATAbits.LATA2 = 1;
+	flagTimerActivated = 1;
+
     while(counter > 0 & !flagSystemUnlocked) {
 		TASK_ENABLE2 = 0;
-        OSTimeDly(500);
+        OSTimeDly(1000);
 		TASK_ENABLE2 = 1;
         counter--;
     }
@@ -306,7 +327,9 @@ static  void  TimerTask (void *p_arg) {
         // Buzzer activated !
         LATAbits.LATA0 = 1;
     }
+	LATAbits.LATA2 = 0;
     TASK_ENABLE2 = 0;
+	flagTimerActivated = 0;
 	OSTaskSuspend(OS_PRIO_SELF);
 }
 
@@ -314,77 +337,67 @@ static void ButtonHandlerTask(void *p_arg) {
 	(void)p_arg;
 	while(1) {
 		TASK_ENABLE3 = 1;
-		if(!PORTDbits.RD12) {
+		if(!PORTDbits.RD12 & !flagTimerActivated & !flagSystemUnlocked) { // the button is ignored when the timer has already been activated
 			OSTaskResume(Timer_Task_PRIO);
+		}
+		if(!PORTDbits.RD13 & flagSystemUnlocked) { // TODO check if timer flag is required
+			LATAbits.LATA7 = 1;
+			flagPasswordChange = 1;
 		}
 		TASK_ENABLE3 = 0;
 		OSTimeDly(Button_handler_Task_PERIOD);
 	}
 }
 
-INT8U getch() {
-	INT8U key1 = 0;
-	INT8U key2 = 0;
-	INT8U key3;
+void stringCopy(char* stringDest, char* stringSrc) {
+	unsigned char i;
+	for(i=0; i<PWDSIZE; i++) {
+		stringDest[i] = stringSrc[i];
+	}
+}
 
-	while(1) {
-		key3 = key2;
-		key2 = key1;
-		key1 = KeyboardScan();
-		if ((key1 == key2) && (key1 != key3) && (key1 != 255)) {
-			return hex2ASCII[key1];
-		}
-		OSTimeDly(Keyboard_Task_PERIOD); // TODO to reduce or useful ?
+void resetPassword(char* code) {
+	unsigned char i;
+	for(i=0; i<PWDSIZE; i++) {
+		code[i] = STARCHAR;
 	}
 }
 
 static  void  KeyboardTask (void *p_arg) {
 	(void)p_arg;			// to avoid a warning message
-	/*
-	KeyboardInit();
-
-	char code[2][4] = {"****", "****"};
-    unsigned char i;
-    while(1) {
-		TASK_ENABLE4 = 1;
-        for(i=0; i<4; i++) {
-			code[0][i] = getch();
-			code[1][i] = code[0][i];
-			OSMboxPost(lcdBox, code[1]);
-        }
-        OSMboxPost(myBox, code[0]);
-		OSMboxPost(lcdBox, code[1]);
-		TASK_ENABLE4 = 0;
-		OSTimeDly(Keyboard_Task_PERIOD);
-    }*/
 	KeyboardInit();
 
 	INT8U key1 = 0;
 	INT8U key2 = 0;
 	INT8U key3;
-	char code[2][4] = {"****", "****"};
+	char code[PWDSIZE] = {STARCHAR, STARCHAR, STARCHAR, STARCHAR};
     unsigned char i;
 
     while(1) {
 		TASK_ENABLE4 = 1;
 		i = 0;
-        while(i<4) {
+        while(i<PWDSIZE) {
 			key3 = key2;
 			key2 = key1;
 			key1 = KeyboardScan();
 			if ((key1 == key2) && (key1 != key3) && (key1 != 255)) {
-				code[0][i] = hex2ASCII[key1];
-				code[1][i] = hex2ASCII[key1];
-				OSMboxPost(lcdBox, code[1]);
+				code[i] = hex2ASCII[key1];
+				stringCopy(lcdpmsg, code);
+				OSMboxPost(lcdBox, lcdpmsg);
 				i++;
 			}
-			// OSTimeDly(Keyboard_Task_PERIOD);
+			TASK_ENABLE4 = 0;
+			OSTimeDly(Keyboard_Task_PERIOD);
+			TASK_ENABLE4 = 1;
         }
-        OSMboxPost(myBox, code[0]);
-		OSMboxPost(lcdBox, code[1]);
+		stringCopy(pmsg, code);
+		stringCopy(lcdpmsg, code);
+        OSMboxPost(myBox, pmsg);
+		OSMboxPost(lcdBox, lcdpmsg);
+		resetPassword(code);
 		TASK_ENABLE4 = 0;
 		OSTimeDly(Keyboard_Task_PERIOD);
-}
+	}
 }
 
 static  void  AppLCDTask (void *p_arg) {
