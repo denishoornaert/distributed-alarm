@@ -1,33 +1,23 @@
 #include "NetworkManager.h"
 
-void initSender() {}
+void initSender() {
+	CanInitialisation(CAN_OP_MODE_NORMAL, CAN_BAUDRATE_500k);
+	CanLoadFilter(0, 0x099);
+	CanLoadMask(0, 0x7FF);
+	CanAssociateMaskFilter(0, 0);
+	ACTIVATE_CAN_INTERRUPTS = 1;
+}
 
-void initReceiver() {}
+void initReceiver() {} // TODO useful ??
 
 void send(MessageTypes messageid, unsigned char size, unsigned char* message) {
-    C1TR01CONbits.TXEN2 = 0x1;
-    C1TR01CONbits.TX2PRI = 0x3;
-
-    ecan1MsgBuf[0][0] = messageid << 2;
-
-    ecan1MsgBuf[0][1] = 0;
-
-    ecan1MsgBuf[0][2] = size;
-
-    unsigned char transmitted = 0;
-    while(transmitted < 8 & transmitted < size) {
-        if(transmitted%2) {
-            // set MSB
-            ecan1MsgBuf[0][transmitted/2] = message[transmitted] << 8;
-        }
-        else {
-            // set LSB
-            ecan1MsgBuf[0][transmitted/2] |= message[transmitted]; // << 0
-        }
-        transmitted++;
-    }
-
-    C1TR01CONbits.TXREQ0 = 0x1;
+    transmitBuffer.SID = messageid;
+	transmitBuffer.DLC = size;
+	unsigned char i;
+	for(i=0; i<size & i<8; i++) {
+		transmitBuffer.DATA[i] = message[i];
+	}
+	CanSendMessage();
 }
 
 void recv() {
