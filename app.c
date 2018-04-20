@@ -25,7 +25,8 @@
 #include <includes.h>	// uC/OSII includes
 #include "Keyboard.h"	// Keyboard functions library
 #include "elec-h-410.h"
-#include <string.h>
+#include <string.h> // useful ??
+#include "NetworkManager.h"
 
 /*
 *********************************************************************************************************
@@ -256,7 +257,6 @@ void LockedSystemActOnCorrectPassword() {
     // timer desactivated !
 	LATAbits.LATA2 = 0;
 	flagTimerActivated = 0;
-    OSTaskSuspend(Timer_Task_PRIO);
 	TASK_ENABLE2 = 0;
 }
 
@@ -272,7 +272,15 @@ unsigned char strEqual(char* word1, char* word2) {
 	return (word1[0] == word2[0] & word1[1] == word2[1] & word1[2] == word2[2] & word1[3] == word2[3]);
 }
 
+void stringCopy(char* stringDest, char* stringSrc) {
+	unsigned char i;
+	for(i=0; i<PWDSIZE; i++) {
+		stringDest[i] = stringSrc[i];
+	}
+}
+
 void checkPasswordValidity(char* userProvidedCode, INT8U* err) {
+	userProvidedCode = OSMboxPend(myBox, 50, err); // blocking instruction
 	if(*err == OS_ERR_NONE) {
        if(strEqual(userProvidedCode, systemProvidedCode)) {
            if(!flagSystemUnlocked) {
@@ -288,20 +296,47 @@ void checkPasswordValidity(char* userProvidedCode, INT8U* err) {
 	}
 }
 
+void changePasswordProcedure(char* userProvidedCode, char* userProvidedCodeConfirmation, INT8U* err) {
+	OSMboxPost(lcdBox, "Enter old pwd");
+	userProvidedCode = OSMboxPend(myBox, 0, err); // blocking instruction
+	if(*err == OS_ERR_NONE) {
+		if(strEqual(userProvidedCode, systemProvidedCode)) {
+			OSMboxPost(lcdBox, "Enter new pwd");
+			userProvidedCode = OSMboxPend(myBox, 0, err); // blocking instruction
+			OSMboxPost(lcdBox, "Confirm new pwd");
+			userProvidedCodeConfirmation = OSMboxPend(myBox, 0, err); // blocking instruction
+			if(strEqual(userProvidedCode, userProvidedCodeConfirmation)) {
+				// put the system password to userProvidedCode
+				stringCopy(systemProvidedCode, userProvidedCode);
+				OSMboxPost(lcdBox, "New pwd set");
+				flagPasswordChange = 0;
+			}
+			else {
+				// password change fail
+				OSMboxPost(lcdBox, "FAIL - unlock");
+				// set the system in unlock mode
+			}
+		}
+		else {
+			OSMboxPost(lcdBox, "Wrong pwd");
+			// set the system in unlock mode
+		}
+	}
+}
+
 static  void PasswordManagementTask (void *p_arg) {
 	(void)p_arg;			// to avoid a warning message
 
 	INT8U err;
 	char* userProvidedCode;
+	char* userProvidedCodeConfirmation;
     while(1) {
 		TASK_ENABLE1 = 1;
 		if(!flagPasswordChange) {
-	        userProvidedCode = OSMboxPend(myBox, 50, &err); // blocking instruction
 			checkPasswordValidity(userProvidedCode, &err);
 		}
 		else { // flagPasswordChange == 1
-			OSMboxPost(lcdBox, "Enter old pwd");
-			userProvidedCode = OSMboxPend(myBox, 50, &err); // blocking instruction
+			changePasswordProcedure(userProvidedCode, userProvidedCodeConfirmation, &err);
 		}
 		TASK_ENABLE1 = 0;
 		OSTimeDly(Password_Management_Task_PERIOD); // useful ?
@@ -317,19 +352,21 @@ static  void  TimerTask (void *p_arg) {
     LATAbits.LATA2 = 1;
 	flagTimerActivated = 1;
 
-    while(counter > 0 & !flagSystemUnlocked) {
+    while(counter > 0 & !flagSystemUnlocked & flagTimerActivated) {
 		TASK_ENABLE2 = 0;
         OSTimeDly(1000);
 		TASK_ENABLE2 = 1;
         counter--;
     }
-    if(!flagSystemUnlocked) {
+    if(!flagSystemUnlocked & flagTimerActivated) {
         // Buzzer activated !
         LATAbits.LATA0 = 1;
     }
+
 	LATAbits.LATA2 = 0;
     TASK_ENABLE2 = 0;
 	flagTimerActivated = 0;
+
 	OSTaskSuspend(OS_PRIO_SELF);
 }
 
@@ -341,18 +378,10 @@ static void ButtonHandlerTask(void *p_arg) {
 			OSTaskResume(Timer_Task_PRIO);
 		}
 		if(!PORTDbits.RD13 & flagSystemUnlocked) { // TODO check if timer flag is required
-			LATAbits.LATA7 = 1;
 			flagPasswordChange = 1;
 		}
 		TASK_ENABLE3 = 0;
 		OSTimeDly(Button_handler_Task_PERIOD);
-	}
-}
-
-void stringCopy(char* stringDest, char* stringSrc) {
-	unsigned char i;
-	for(i=0; i<PWDSIZE; i++) {
-		stringDest[i] = stringSrc[i];
 	}
 }
 
